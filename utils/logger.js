@@ -500,6 +500,26 @@ async function logModerationAction(guild, moderator, target, action, reason) {
     await sendLog(guild, embed);
 }
 
+async function logInfractionRevoked(guild, moderator, infraction, revokeReason) {
+    const user = await guild.client.users.fetch(infraction.userId).catch(() => null);
+    const userName = user ? user.tag : 'Unknown User';
+
+    const embed = new EmbedBuilder()
+        .setColor('#27ae60')
+        .setTitle('Infraction Revoked')
+        .addFields(
+            { name: 'Infraction ID', value: infraction.id, inline: true },
+            { name: 'User', value: userName + '\n' + infraction.userId, inline: true },
+            { name: 'Revoked By', value: moderator.tag, inline: true },
+            { name: 'Original Type', value: infraction.type.charAt(0).toUpperCase() + infraction.type.slice(1), inline: true },
+            { name: 'Original Reason', value: infraction.reason.substring(0, 500), inline: false },
+            { name: 'Revocation Reason', value: revokeReason, inline: false }
+        )
+        .setFooter({ text: 'Jaxdrax Studio Audit', iconURL: LOGO_URL })
+        .setTimestamp();
+    await sendLog(guild, embed);
+}
+
 module.exports = {
     logMemberJoin,
     logMemberLeave,
@@ -524,5 +544,6 @@ module.exports = {
     logInviteDelete,
     logThreadCreate,
     logThreadDelete,
-    logModerationAction
+    logModerationAction,
+    logInfractionRevoked
 };
