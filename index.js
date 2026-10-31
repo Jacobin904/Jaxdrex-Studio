@@ -38,21 +38,24 @@ const client = new Client({
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildModeration,
+        GatewayIntentBits.GuildEmojisAndStickers,
+        GatewayIntentBits.GuildInvites,
         GatewayIntentBits.MessageContent
     ],
-    partials: [Partials.GuildMember, Partials.Channel]
+    partials: [Partials.GuildMember, Partials.Channel, Partials.Message, Partials.User]
 });
 
 client.commands = new Collection();
 client.legacyCommands = new Collection();
 
-// --- Registry sécurisé ---
+// --- Registry ---
 function readRegistry() {
     try {
         if (!fs.existsSync(MESSAGE_FILE)) return {};
         const stats = fs.statSync(MESSAGE_FILE);
         if (stats.size > 1024 * 1024) {
-            console.warn('[Registry] File corrupted or too large, resetting.');
+            console.warn('[Registry] File too large, resetting.');
             fs.unlinkSync(MESSAGE_FILE);
             return {};
         }
@@ -168,7 +171,9 @@ function loadCommands() {
                 toRegister.push(command.data.toJSON());
                 console.log('[Command] Loaded (slash): ' + name);
             } else {
-                const fallback = new SlashCommandBuilder().setName(name).setDescription(command.description || 'Runs the ' + name + ' command');
+                const fallback = new SlashCommandBuilder()
+                    .setName(name)
+                    .setDescription(command.description || 'Runs the ' + name + ' command');
                 client.commands.set(name, command);
                 toRegister.push(fallback.toJSON());
                 console.log('[Command] Loaded (auto slash): ' + name);
@@ -215,7 +220,7 @@ function loadEvents() {
             const isReady = event.name === Events.ClientReady || event.name === 'ready';
             const run = (...args) => {
                 Promise.resolve(isReady ? event.execute(client) : event.execute(client, ...args))
-                    .catch(error => console.error('[Event:' + event.name + ']', error));
+                    .catch(error => console.error('[Event:' + event.name + ']', error.message));
             };
 
             if (event.once) client.once(event.name, run);
@@ -228,7 +233,7 @@ function loadEvents() {
 }
 loadEvents();
 
-// --- Interaction Handlers ---
+// --- Info Buttons ---
 async function handleInfoButton(interaction) {
     if (interaction.customId === 'info_view_license') {
         const embed = new EmbedBuilder()
@@ -271,81 +276,126 @@ async function handleInfoButton(interaction) {
     return false;
 }
 
+// --- Tickets ---
 async function handleTicketCreate(interaction) {
+    const guild = interaction.guild;
+
+    const existing = guild.channels.cache.find(c =>
+        c.name.startsWith('ticket-') && c.topic && c.topic.includes('Creator: ' + interaction.user.id)
+    );
+
+    if (existing) {
+        return interaction.reply({
+            content: 'You already have an open ticket: ' + existing,
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
     const modal = new ModalBuilder().setCustomId('ticket_modal').setTitle('Open A Support Ticket');
-    const categoryInput = new TextInputBuilder().setCustomId('ticket_category').setLabel('Category').setStyle(TextInputStyle.Short).setPlaceholder('Account, Bug Report, Player Report, Appeal, Licensing').setMaxLength(50).setRequired(true);
-    const descriptionInput = new TextInputBuilder().setCustomId('ticket_description').setLabel('Description').setStyle(TextInputStyle.Paragraph).setPlaceholder('Describe your issue in detail.').setMaxLength(1000).setRequired(true);
-    
-    modal.addComponents(new ActionRowBuilder().addComponents(categoryInput), new ActionRowBuilder().addComponents(descriptionInput));
+    const categoryInput = new TextInputBuilder()
+        .setCustomId('ticket_category')
+        .setLabel('Category')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('Account, Bug Report, Player Report, Appeal, Licensing')
+        .setMaxLength(50)
+        .setRequired(true);
+    const descriptionInput = new TextInputBuilder()
+        .setCustomId('ticket_description')
+        .setLabel('Description')
+        .setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder('Describe your issue in detail.')
+        .setMaxLength(1000)
+        .setRequired(true);
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(categoryInput),
+        new ActionRowBuilder().addComponents(descriptionInput)
+    );
     return interaction.showModal(modal);
 }
 
 async function handleTicketModal(interaction) {
     try {
-        const rawCategory = interaction.fields.getTextInputValue('ticket_category');
-        const rawDescription = interaction.fields.getTextInputValue('ticket_description');
-
-        const category = String(rawCategory || 'Unknown').substring(0, 50);
-        const description = String(rawDescription || 'No description').substring(0, 1000);
+        const category = String(interaction.fields.getTextInputValue('ticket_category') || 'Unknown').substring(0, 50);
+        const description = String(interaction.fields.getTextInputValue('ticket_description') || 'No description').substring(0, 1000);
 
         const guild = interaction.guild;
+
+        const existing = guild.channels.cache.find(c =>
+            c.name.startsWith('ticket-') && c.topic && c.topic.includes('Creator: ' + interaction.user.id)
+        );
+
+        if (existing) {
+            return interaction.reply({
+                content: 'You already have an open ticket: ' + existing,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
         const infoChannel = guild.channels.cache.find(c => c.name === 'info' || c.name === 'informations');
         const targetCategoryId = infoChannel ? infoChannel.parentId : null;
 
         if (!targetCategoryId) {
             return interaction.reply({
-                content: 'Could not find the category for the "info" or "informations" channel. Please ensure this channel exists and is placed inside a category.',
+                content: 'Could not find the category for the informations channel. Please contact a staff member.',
                 flags: MessageFlags.Ephemeral
             });
         }
 
         const staffRole = guild.roles.cache.find(r => STAFF_ROLES.includes(r.name));
-        const safeUsername = String(interaction.user.username || 'user').substring(0, 50).replace(/[^a-zA-Z0-9_-]/g, '');
+        const safeUsername = String(interaction.user.username || 'user').substring(0, 40).replace(/[^a-zA-Z0-9_-]/g, '') || 'user';
+
+        const overwrites = [
+            { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+            { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+            { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages] }
+        ];
+
+        for (const roleName of STAFF_ROLES) {
+            const role = guild.roles.cache.find(r => r.name === roleName);
+            if (role) {
+                overwrites.push({
+                    id: role.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageMessages]
+                });
+            }
+        }
 
         const ticketChannel = await guild.channels.create({
-            name: `ticket-${safeUsername}`,
+            name: 'ticket-' + safeUsername,
             type: ChannelType.GuildText,
             parent: targetCategoryId,
-            topic: `Ticket by ${interaction.user.tag} | Category: ${category} | Creator: ${interaction.user.id}`,
-            permissionOverwrites: [
-                { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-                { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-                { id: staffRole ? staffRole.id : guild.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageMessages] }
-            ]
+            topic: 'Ticket by ' + interaction.user.tag + ' | Category: ' + category + ' | Creator: ' + interaction.user.id,
+            permissionOverwrites: overwrites
         });
 
         const ticketEmbed = new EmbedBuilder()
             .setColor(COLORS.dark)
             .setTitle('Support Ticket Opened')
             .setDescription(
-                `**User:** ${interaction.user.tag}\n` +
-                `**ID:** ${interaction.user.id}\n` +
-                `**Category:** ${category}\n\n` +
-                `**Description:**\n${description}`
+                '**User:** ' + interaction.user.tag + '\n' +
+                '**ID:** ' + interaction.user.id + '\n' +
+                '**Category:** ' + category + '\n\n' +
+                '**Description:**\n' + description
             )
             .setImage(BANNER_URL)
             .setFooter({ text: 'Jaxdrax Studio Support', iconURL: LOGO_URL })
             .setTimestamp();
 
-        const closeButton = new ButtonBuilder()
-            .setCustomId('ticket_close')
-            .setLabel('Close Ticket')
-            .setStyle(ButtonStyle.Danger);
-
-        const closeRow = new ActionRowBuilder().addComponents(closeButton);
+        const closeButton = new ButtonBuilder().setCustomId('ticket_close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger);
 
         await ticketChannel.send({
-            content: `${interaction.user} | Staff will be with you shortly.`,
+            content: interaction.user.toString() + ' | Staff will be with you shortly.',
             embeds: [ticketEmbed],
-            components: [closeRow]
+            components: [new ActionRowBuilder().addComponents(closeButton)]
         });
 
         return interaction.reply({
-            content: `Your ticket has been created: ${ticketChannel}`,
+            content: 'Your ticket has been created: ' + ticketChannel,
             flags: MessageFlags.Ephemeral
         });
     } catch (error) {
-        console.error('[Ticket] Create error:', error.message, error.stack);
+        console.error('[Ticket] Create error:', error.message);
         return interaction.reply({
             content: 'An error occurred while creating your ticket. Please try again later.',
             flags: MessageFlags.Ephemeral
@@ -353,55 +403,49 @@ async function handleTicketModal(interaction) {
     }
 }
 
+function extractCreatorId(channel) {
+    if (!channel.topic) return null;
+    const part = channel.topic.split('|').find(p => p.includes('Creator:'));
+    return part ? part.replace('Creator:', '').trim() : null;
+}
+
 async function handleTicketClose(interaction) {
     try {
         const channel = interaction.channel;
         if (!channel || channel.type !== ChannelType.GuildText) return;
 
-        const topicParts = channel.topic ? channel.topic.split('|') : [];
-        const creatorPart = topicParts.find(p => p.includes('Creator:'));
-        const creatorId = creatorPart ? creatorPart.replace('Creator:', '').trim() : null;
-
+        const creatorId = extractCreatorId(channel);
         await interaction.deferReply();
 
         if (creatorId) {
             await channel.permissionOverwrites.edit(creatorId, {
                 ViewChannel: false,
                 SendMessages: false,
-                ReadMessageHistory: true
+                ReadMessageHistory: false
             });
         }
 
         const closeEmbed = new EmbedBuilder()
             .setColor(COLORS.dark)
             .setTitle('Ticket Closed')
-            .setDescription('This ticket has been closed by a staff member.\n\nThe ticket creator can no longer see this channel.\n\n**What would you like to do?**')
+            .setDescription(
+                'Closed by ' + interaction.user.tag + '.\n\n' +
+                'The ticket creator can no longer see this channel.\n\n' +
+                '**Reopen Ticket** restores access for the creator.\n' +
+                '**Close Permanently** archives the transcript and deletes this channel.'
+            )
             .setImage(BANNER_URL)
             .setFooter({ text: 'Jaxdrax Studio Support', iconURL: LOGO_URL })
             .setTimestamp();
 
-        const reopenButton = new ButtonBuilder()
-            .setCustomId('ticket_reopen')
-            .setLabel('Reopen Ticket')
-            .setStyle(ButtonStyle.Success);
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('ticket_reopen').setLabel('Reopen Ticket').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('ticket_delete').setLabel('Close Permanently').setStyle(ButtonStyle.Danger)
+        );
 
-        const deleteButton = new ButtonBuilder()
-            .setCustomId('ticket_delete')
-            .setLabel('Close Permanently')
-            .setStyle(ButtonStyle.Danger);
-
-        const row = new ActionRowBuilder().addComponents(reopenButton, deleteButton);
-
-        await interaction.editReply({
-            embeds: [closeEmbed],
-            components: [row]
-        });
+        await interaction.editReply({ embeds: [closeEmbed], components: [row] });
     } catch (error) {
         console.error('[Ticket] Close error:', error.message);
-        await interaction.reply({
-            content: 'An error occurred while closing the ticket.',
-            flags: MessageFlags.Ephemeral
-        });
     }
 }
 
@@ -410,9 +454,8 @@ async function handleTicketReopen(interaction) {
         const channel = interaction.channel;
         if (!channel || channel.type !== ChannelType.GuildText) return;
 
-        const topicParts = channel.topic ? channel.topic.split('|') : [];
-        const creatorPart = topicParts.find(p => p.includes('Creator:'));
-        const creatorId = creatorPart ? creatorPart.replace('Creator:', '').trim() : null;
+        const creatorId = extractCreatorId(channel);
+        const reason = 'Reopened by ' + interaction.user.tag;
 
         await interaction.deferReply();
 
@@ -427,28 +470,23 @@ async function handleTicketReopen(interaction) {
         const reopenEmbed = new EmbedBuilder()
             .setColor(COLORS.dark)
             .setTitle('Ticket Reopened')
-            .setDescription(`This ticket has been reopened by ${interaction.user.tag}.\n\nThe ticket creator can now see and interact in this channel again.`)
+            .setDescription(
+                '**Reopened by:** ' + interaction.user.tag + '\n' +
+                '**Reason:** ' + reason + '\n\n' +
+                'The ticket creator can now see and interact in this channel again.'
+            )
             .setImage(BANNER_URL)
             .setFooter({ text: 'Jaxdrax Studio Support', iconURL: LOGO_URL })
             .setTimestamp();
 
-        const closeButton = new ButtonBuilder()
-            .setCustomId('ticket_close')
-            .setLabel('Close Ticket')
-            .setStyle(ButtonStyle.Danger);
-
-        const row = new ActionRowBuilder().addComponents(closeButton);
+        const closeButton = new ButtonBuilder().setCustomId('ticket_close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger);
 
         await interaction.editReply({
             embeds: [reopenEmbed],
-            components: [row]
+            components: [new ActionRowBuilder().addComponents(closeButton)]
         });
     } catch (error) {
         console.error('[Ticket] Reopen error:', error.message);
-        await interaction.reply({
-            content: 'An error occurred while reopening the ticket.',
-            flags: MessageFlags.Ephemeral
-        });
     }
 }
 
@@ -456,19 +494,17 @@ async function generateTranscript(channel) {
     try {
         const messages = await channel.messages.fetch({ limit: 100 });
         const sorted = Array.from(messages.values()).reverse();
-        
-        let transcript = `===========================================\n`;
-        transcript += `TICKET TRANSCRIPT\n`;
-        transcript += `Channel: #${channel.name}\n`;
-        transcript += `Created: ${channel.createdAt.toUTCString()}\n`;
-        transcript += `Closed: ${new Date().toUTCString()}\n`;
-        transcript += `===========================================\n\n`;
+
+        let transcript = '===========================================\n';
+        transcript += 'TICKET TRANSCRIPT\n';
+        transcript += 'Channel: #' + channel.name + '\n';
+        transcript += 'Topic: ' + (channel.topic || 'None') + '\n';
+        transcript += 'Created: ' + channel.createdAt.toUTCString() + '\n';
+        transcript += 'Closed: ' + new Date().toUTCString() + '\n';
+        transcript += '===========================================\n\n';
 
         for (const msg of sorted) {
-            const author = msg.author.tag;
-            const timestamp = msg.createdAt.toUTCString();
-            const content = msg.content || '[No content / Embed or attachment]';
-            transcript += `[${timestamp}] ${author}: ${content}\n`;
+            transcript += '[' + msg.createdAt.toUTCString() + '] ' + msg.author.tag + ': ' + (msg.content || '[Embed or attachment]') + '\n';
         }
 
         return transcript;
@@ -486,52 +522,41 @@ async function handleTicketDelete(interaction) {
         await interaction.deferReply();
 
         const transcript = await generateTranscript(channel);
-
         const guild = interaction.guild;
         const transcriptChannel = guild.channels.cache.find(c => c.name === 'ticket-transcripts');
 
         if (transcriptChannel) {
-            const topicParts = channel.topic ? channel.topic.split('|') : [];
-            const creatorPart = topicParts.find(p => p.includes('Creator:'));
-            const creatorId = creatorPart ? creatorPart.replace('Creator:', '').trim() : 'Unknown';
-            const categoryPart = topicParts.find(p => p.includes('Category:'));
+            const creatorId = extractCreatorId(channel) || 'Unknown';
+            const categoryPart = channel.topic ? channel.topic.split('|').find(p => p.includes('Category:')) : null;
             const category = categoryPart ? categoryPart.replace('Category:', '').trim() : 'Unknown';
 
             const transcriptEmbed = new EmbedBuilder()
                 .setColor(COLORS.dark)
                 .setTitle('Ticket Closed Permanently')
                 .setDescription(
-                    `**Channel:** #${channel.name}\n` +
-                    `**Creator:** <@${creatorId}>\n` +
-                    `**Category:** ${category}\n` +
-                    `**Closed by:** ${interaction.user.tag}\n` +
-                    `**Closed at:** ${new Date().toUTCString()}`
+                    '**Channel:** #' + channel.name + '\n' +
+                    '**Creator:** <@' + creatorId + '>\n' +
+                    '**Category:** ' + category + '\n' +
+                    '**Closed by:** ' + interaction.user.tag + '\n' +
+                    '**Closed at:** ' + new Date().toUTCString()
                 )
                 .setImage(BANNER_URL)
                 .setFooter({ text: 'Jaxdrax Studio Support', iconURL: LOGO_URL })
                 .setTimestamp();
 
-            const buffer = Buffer.from(transcript, 'utf-8');
             await transcriptChannel.send({
                 embeds: [transcriptEmbed],
-                files: [{ attachment: buffer, name: `transcript-${channel.name}.txt` }]
+                files: [{ attachment: Buffer.from(transcript, 'utf-8'), name: 'transcript-' + channel.name + '.txt' }]
             });
         }
 
-        await interaction.editReply({
-            content: 'Ticket closed permanently. The transcript has been saved.',
-            components: []
-        });
+        await interaction.editReply({ content: 'Ticket closed permanently. Transcript saved.', components: [] });
 
-        setTimeout(async () => {
-            await channel.delete('Ticket closed permanently').catch(console.error);
+        setTimeout(() => {
+            channel.delete('Ticket closed permanently').catch(() => {});
         }, 3000);
     } catch (error) {
         console.error('[Ticket] Delete error:', error.message);
-        await interaction.reply({
-            content: 'An error occurred while deleting the ticket.',
-            flags: MessageFlags.Ephemeral
-        });
     }
 }
 
@@ -554,7 +579,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     await command.execute(interaction, isStaff, client);
                 }
             } catch (error) {
-                console.error('[Slash] ' + interaction.commandName + ':', error.message, error.stack);
+                console.error('[Slash] ' + interaction.commandName + ':', error.message);
                 const payload = { content: 'An unexpected error occurred while running this command.', flags: MessageFlags.Ephemeral };
                 if (interaction.replied || interaction.deferred) {
                     await interaction.followUp(payload).catch(() => {});
@@ -569,40 +594,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
             return;
         }
 
-        // Gère boutons, modals ET menus déroulants
-        if (!interaction.isButton() && !interaction.isModalSubmit() && !interaction.isStringSelectMenu()) return;
+        const isComponent =
+            interaction.isButton() ||
+            interaction.isModalSubmit() ||
+            interaction.isStringSelectMenu() ||
+            interaction.isUserSelectMenu() ||
+            interaction.isRoleSelectMenu() ||
+            interaction.isChannelSelectMenu() ||
+            interaction.isMentionableSelectMenu();
+
+        if (!isComponent) return;
 
         const id = interaction.customId || '';
 
-        // Tickets
-        if (id === 'ticket_create') {
-            await handleTicketCreate(interaction);
-            return;
-        }
-        if (id === 'ticket_modal') {
-            await handleTicketModal(interaction);
-            return;
-        }
-        if (id === 'ticket_close') {
-            await handleTicketClose(interaction);
-            return;
-        }
-        if (id === 'ticket_reopen') {
-            await handleTicketReopen(interaction);
-            return;
-        }
-        if (id === 'ticket_delete') {
-            await handleTicketDelete(interaction);
-            return;
-        }
+        if (id === 'ticket_create') { await handleTicketCreate(interaction); return; }
+        if (id === 'ticket_modal') { await handleTicketModal(interaction); return; }
+        if (id === 'ticket_close') { await handleTicketClose(interaction); return; }
+        if (id === 'ticket_reopen') { await handleTicketReopen(interaction); return; }
+        if (id === 'ticket_delete') { await handleTicketDelete(interaction); return; }
 
-        // Info buttons
-        if (id.startsWith('info_')) {
-            await handleInfoButton(interaction);
-            return;
-        }
+        if (id.startsWith('info_')) { await handleInfoButton(interaction); return; }
 
-        // Modpanel (boutons, menus déroulants, modals)
         if (id.startsWith('mod_') || id === 'modpanel_menu') {
             try {
                 const panel = require('./utils/modpanel');
@@ -610,31 +622,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     await panel.handleInteraction(interaction);
                 }
             } catch (error) {
-                console.error('[Modpanel]', error.message, error.stack);
+                console.error('[Modpanel]', error.message);
             }
             return;
         }
 
-        // Review
         if (id.startsWith('review_')) {
             try {
                 const review = require('./commands/review');
                 if (typeof review.handleInteraction === 'function') await review.handleInteraction(interaction);
             } catch (error) {
-                console.error('[Review]', error.message, error.stack);
+                console.error('[Review]', error.message);
             }
             return;
         }
     } catch (error) {
-        console.error('[Interaction]', error.message, error.stack);
+        console.error('[Interaction]', error.message);
     }
 });
 
-// --- Message Listener ---
+// --- Prefix Commands ---
 client.on(Events.MessageCreate, async (message) => {
     try {
-        if (message.author.bot || !message.guild) return;
-        if (!message.content.startsWith(PREFIX)) return;
+        if (!message || !message.author || message.author.bot || !message.guild) return;
+        if (!message.content || !message.content.startsWith(PREFIX)) return;
 
         const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
         const name = args.shift().toLowerCase();
@@ -650,7 +661,7 @@ client.on(Events.MessageCreate, async (message) => {
             await command.execute(message, isStaff, client);
         }
     } catch (error) {
-        console.error('[Prefix]', error.message, error.stack);
+        console.error('[Prefix]', error.message);
     }
 });
 
