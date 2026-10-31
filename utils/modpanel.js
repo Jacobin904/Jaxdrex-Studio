@@ -11,6 +11,7 @@ const {
 } = require('discord.js');
 
 const { COLORS, LOGO_URL, BANNER_URL, STAFF_ROLES } = require('../config/constants');
+const infractions = require('./infractions');
 
 async function handleInteraction(interaction) {
     const id = interaction.customId || '';
@@ -93,7 +94,7 @@ async function handleInteraction(interaction) {
                 const embed = new EmbedBuilder()
                     .setColor(COLORS.darkRed)
                     .setTitle('Recent Moderation Logs')
-                    .setDescription('All moderation actions are automatically logged in the dev-logs channel. This includes:\n\n• Member joins and leaves\n• Message deletions and edits\n• Role changes\n• Voice state changes\n• Channel modifications\n• Bans and unbans\n• Timeouts and warnings\n• And much more...')
+                    .setDescription('All moderation actions are automatically logged in the dev-logs channel. This includes:\n\n• Member joins and leaves\n• Message deletions and edits\n• Role changes\n• Voice state changes\n• Channel modifications\n• Bans and unbans\n• Timeouts and warnings\n• Infractions issued and revoked\n• And much more...')
                     .addFields(
                         { name: 'Where To Find Logs', value: 'All events are logged in the #dev-logs channel with detailed embeds including timestamps, responsible moderators, and affected members.', inline: false },
                         { name: 'Log Retention', value: 'Logs are retained indefinitely in the dev-logs channel. For detailed analysis, use the ticket system to request a full audit.', inline: false }
@@ -149,6 +150,8 @@ async function handleInteraction(interaction) {
                 ? '<t:' + Math.floor(timeoutExpires / 1000) + ':R>'
                 : 'None';
 
+            const infractionCount = infractions.getInfractionCount(member.id);
+
             const embed = new EmbedBuilder()
                 .setColor(isStaff ? COLORS.darkRed : COLORS.dark)
                 .setTitle('Member Investigation')
@@ -161,6 +164,7 @@ async function handleInteraction(interaction) {
                     { name: 'Joined Server', value: '<t:' + Math.floor(member.joinedTimestamp / 1000) + ':R>', inline: false },
                     { name: 'Is Staff', value: isStaff ? 'Yes' : 'No', inline: true },
                     { name: 'Current Timeout', value: timeoutInfo, inline: true },
+                    { name: 'Infractions', value: '**Total:** ' + infractionCount.total + '\n**Active:** ' + infractionCount.active + '\n**Revoked:** ' + infractionCount.revoked, inline: true },
                     { name: 'Roles (' + member.roles.cache.size + ')', value: roles.substring(0, 1000) || 'None', inline: false }
                 )
                 .setImage(BANNER_URL)
@@ -174,7 +178,8 @@ async function handleInteraction(interaction) {
                     { label: 'Warn Member', value: 'mod_action_warn_' + member.id, description: 'Issue an official warning (logged)' },
                     { label: 'Timeout Member', value: 'mod_action_timeout_' + member.id, description: 'Temporarily restrict communication' },
                     { label: 'Kick Member', value: 'mod_action_kick_' + member.id, description: 'Remove from server (can rejoin)' },
-                    { label: 'Ban Member', value: 'mod_action_ban_' + member.id, description: 'Permanent removal from server' }
+                    { label: 'Ban Member', value: 'mod_action_ban_' + member.id, description: 'Permanent removal from server' },
+                    { label: 'View Infractions', value: 'mod_view_infractions_' + member.id, description: 'View all infractions for this member' }
                 );
 
             const row = new ActionRowBuilder().addComponents(actionMenu);
@@ -187,6 +192,62 @@ async function handleInteraction(interaction) {
         if (id.startsWith('mod_action_menu_') && interaction.isStringSelectMenu()) {
             const value = interaction.values[0];
             console.log('[Modpanel] Action selected:', value);
+
+            // ========== VOIR LES INFRACTIONS ==========
+            if (value.startsWith('mod_view_infractions_')) {
+                const targetId = value.replace('mod_view_infractions_', '');
+                const userInfractions = infractions.getUserInfractions(targetId);
+
+                if (userInfractions.length === 0) {
+                    return interaction.reply({
+                        content: 'This member has no infractions.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                let description = '**Total Infractions:** ' + userInfractions.length + '\n\n';
+
+                for (const inf of userInfractions.slice(0, 10)) {
+                    const moderator = await interaction.client.users.fetch(inf.moderatorId).catch(() => null);
+                    const moderatorName = moderator ? moderator.tag : 'Unknown';
+                    const date = '<t:' + Math.floor(new Date(inf.createdAt).getTime() / 1000) + ':R>';
+
+                    if (inf.revoked) {
+                        const revoker = await interaction.client.users.fetch(inf.revokedBy).catch(() => null);
+                        const revokerName = revoker ? revoker.tag : 'Unknown';
+                        const revokeDate = '<t:' + Math.floor(new Date(inf.revokedAt).getTime() / 1000) + ':R>';
+
+                        description += '~~**[' + inf.id + ']** ' + inf.type.charAt(0).toUpperCase() + inf.type.slice(1) + ' by ' + moderatorName + ' on ' + date + '~~\n';
+                        description += '~~Reason: ' + inf.reason.substring(0, 100) + '~~\n';
+                        description += '~~**REVOKED** by ' + revokerName + ' on ' + revokeDate + ': ' + inf.revokeReason + '~~\n\n';
+                    } else {
+                        description += '**[' + inf.id + ']** ' + inf.type.charAt(0).toUpperCase() + inf.type.slice(1) + ' by ' + moderatorName + ' on ' + date + '\n';
+                        description += 'Reason: ' + inf.reason.substring(0, 100) + '\n\n';
+                    }
+                }
+
+                if (userInfractions.length > 10) {
+                    description += '\n*... and ' + (userInfractions.length - 10) + ' more infractions. Use the revoke system to manage specific infractions by ID.*';
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor(COLORS.darkRed)
+                    .setTitle('Member Infractions')
+                    .setDescription(description)
+                    .setImage(BANNER_URL)
+                    .setFooter({ text: 'Jaxdrax Studio Infraction System', iconURL: LOGO_URL })
+                    .setTimestamp();
+
+                const revokeButton = new ButtonBuilder()
+                    .setCustomId('mod_revoke_infraction_' + targetId)
+                    .setLabel('Revoke Infraction')
+                    .setStyle(ButtonStyle.Danger);
+
+                const row = new ActionRowBuilder().addComponents(revokeButton);
+
+                return interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
+            }
+
             const match = value.match(/^mod_action_(warn|timeout|kick|ban)_(\d+)$/);
 
             if (!match) {
@@ -228,8 +289,66 @@ async function handleInteraction(interaction) {
             }
 
             modal.addComponents(...rows);
-            console.log('[Modpanel] Showing action modal for', actionType);
             return interaction.showModal(modal);
+        }
+
+        // ========== REVOQUER UNE INFRACTION ==========
+        if (id.startsWith('mod_revoke_infraction_') && interaction.isButton()) {
+            const targetId = id.replace('mod_revoke_infraction_', '');
+
+            const modal = new ModalBuilder()
+                .setCustomId('mod_revoke_modal_' + targetId)
+                .setTitle('Revoke Infraction');
+
+            const infractionIdInput = new TextInputBuilder()
+                .setCustomId('infraction_id')
+                .setLabel('Infraction ID')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('Ex: INF-1234567890-1234')
+                .setRequired(true);
+
+            const reasonInput = new TextInputBuilder()
+                .setCustomId('revoke_reason')
+                .setLabel('Reason for Revocation')
+                .setStyle(TextInputStyle.Paragraph)
+                .setPlaceholder('Explain why this infraction is being revoked.')
+                .setMaxLength(500)
+                .setRequired(true);
+
+            modal.addComponents(
+                new ActionRowBuilder().addComponents(infractionIdInput),
+                new ActionRowBuilder().addComponents(reasonInput)
+            );
+
+            return interaction.showModal(modal);
+        }
+
+        // ========== EXECUTION DE LA REVOCATION ==========
+        if (id.startsWith('mod_revoke_modal_') && interaction.isModalSubmit()) {
+            const infractionId = interaction.fields.getTextInputValue('infraction_id');
+            const revokeReason = interaction.fields.getTextInputValue('revoke_reason');
+
+            const result = await infractions.revokeInfraction(infractionId, interaction.user.id, revokeReason);
+
+            if (!result.success) {
+                return interaction.reply({
+                    content: 'Failed to revoke infraction: ' + result.error,
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            // Logger la révocation
+            try {
+                const logger = require('./logger');
+                await logger.logInfractionRevoked(interaction.guild, interaction.user, result.infraction, revokeReason);
+            } catch (logError) {
+                console.error('[Modpanel] Log failed:', logError.message);
+            }
+
+            return interaction.reply({
+                content: 'Infraction **' + infractionId + '** has been successfully revoked.\n\n**Reason:** ' + revokeReason,
+                flags: MessageFlags.Ephemeral
+            });
         }
 
         // ========== EXECUTION DE L'ACTION ==========
@@ -252,7 +371,9 @@ async function handleInteraction(interaction) {
                 let resultMessage = '';
 
                 if (actionType === 'warn') {
-                    resultMessage = 'Warning issued to ' + member.user.tag + ' for: ' + reason;
+                    // Ajouter une infraction
+                    const infraction = await infractions.addInfraction(member.id, interaction.user.id, 'warn', reason);
+                    resultMessage = 'Warning issued to ' + member.user.tag + ' for: ' + reason + '\n\n**Infraction ID:** ' + infraction.id;
                 } else if (actionType === 'timeout') {
                     const durationStr = interaction.fields.getTextInputValue('mod_duration');
                     const durMatch = durationStr.match(/^(\d+)(m|h|d)$/);
@@ -266,13 +387,22 @@ async function handleInteraction(interaction) {
                     if (unit === 'd') ms *= 24 * 60 * 60 * 1000;
 
                     await member.timeout(ms, reason);
-                    resultMessage = 'Timeout applied to ' + member.user.tag + ' for ' + durationStr + '. Reason: ' + reason;
+                    
+                    // Ajouter une infraction
+                    const infraction = await infractions.addInfraction(member.id, interaction.user.id, 'timeout', reason + ' (Duration: ' + durationStr + ')');
+                    resultMessage = 'Timeout applied to ' + member.user.tag + ' for ' + durationStr + '. Reason: ' + reason + '\n\n**Infraction ID:** ' + infraction.id;
                 } else if (actionType === 'kick') {
                     await member.kick(reason);
-                    resultMessage = member.user.tag + ' has been kicked. Reason: ' + reason;
+                    
+                    // Ajouter une infraction
+                    const infraction = await infractions.addInfraction(member.id, interaction.user.id, 'kick', reason);
+                    resultMessage = member.user.tag + ' has been kicked. Reason: ' + reason + '\n\n**Infraction ID:** ' + infraction.id;
                 } else if (actionType === 'ban') {
                     await member.ban({ reason: reason, deleteMessageSeconds: 0 });
-                    resultMessage = member.user.tag + ' has been banned. Reason: ' + reason;
+                    
+                    // Ajouter une infraction
+                    const infraction = await infractions.addInfraction(member.id, interaction.user.id, 'ban', reason);
+                    resultMessage = member.user.tag + ' has been banned. Reason: ' + reason + '\n\n**Infraction ID:** ' + infraction.id;
                 }
 
                 try {
