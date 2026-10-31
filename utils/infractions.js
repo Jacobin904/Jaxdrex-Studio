@@ -61,6 +61,12 @@ function getUserInfractions(userId) {
     return infractions.filter(inf => inf.userId === userId);
 }
 
+// NOUVELLE FONCTION : Récupérer uniquement les infractions actives (non révoquées)
+function getUserActiveInfractions(userId) {
+    const infractions = loadInfractions();
+    return infractions.filter(inf => inf.userId === userId && !inf.revoked);
+}
+
 function getInfractionById(infractionId) {
     const infractions = loadInfractions();
     return infractions.find(inf => inf.id === infractionId) || null;
@@ -100,6 +106,7 @@ function getInfractionCount(userId) {
 module.exports = {
     addInfraction,
     getUserInfractions,
+    getUserActiveInfractions,
     getInfractionById,
     revokeInfraction,
     getInfractionCount,
